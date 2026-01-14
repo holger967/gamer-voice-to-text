@@ -1,0 +1,5 @@
+keyboard
+openai-whisper
+torch
+pyaudio
+pyperclip
