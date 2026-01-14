@@ -9,11 +9,52 @@ import winsound
 import os
 import configparser
 import warnings
-import audioop
-import numpy as np
-
+import traceback
+import datetime
+import shutil
 
 warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
+
+# ------------------------------
+# LOGGING SYSTEM (NEW)
+# ------------------------------
+LOG_FILE = "last_run_log.txt"
+
+def start_new_log():
+    """Wipes the old log and starts a new one for this session."""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_FILE, "w", encoding="utf-8") as f:
+        f.write(f"=== SESSION STARTED: {timestamp} ===\n")
+
+def log(message):
+    """Prints to console AND writes to the log file."""
+    # 1. Print to screen so you can see it
+    print(message)
+    
+    # 2. Save to file so you can read it later if it crashes
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception:
+        pass # If logging fails, don't crash the program
+
+def log_crash(e):
+    """Logs the technical error details if a crash happens."""
+    error_trace = traceback.format_exc()
+    log(f"\n❌ CRASH DETECTED: {e}")
+    
+    # Write full technical details to file only
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write("\n--- TECHNICAL ERROR DETAILS ---\n")
+            f.write(error_trace)
+            f.write("-------------------------------\n")
+    except Exception:
+        pass
+    
+    print("📄 Check 'last_run_log.txt' to see what happened.")
+
 
 # ------------------------------
 # SETTINGS
@@ -23,17 +64,14 @@ settings_file = "settings.ini"
 
 
 def load_settings():
-    # Load existing if present
     if os.path.exists(settings_file):
         config.read(settings_file)
 
-    # Ensure sections exist
     if "Keys" not in config:
         config["Keys"] = {}
     if "Audio" not in config:
         config["Audio"] = {}
 
-    # Set defaults if missing (auto-upgrade old settings.ini)
     changed = False
 
     if not config.has_option("Keys", "record_key"):
@@ -49,7 +87,6 @@ def load_settings():
     if not config.has_option("Audio", "model_size"):
         config.set("Audio", "model_size", "medium"); changed = True
 
-    # If we added anything, write it back once
     if changed:
         with open(settings_file, "w") as f:
             config.write(f)
@@ -71,117 +108,127 @@ def save_key(key_code_name, key_name_name, scan_code, key_name):
     config.set("Keys", key_name_name, key_name.title())
     with open(settings_file, "w") as f:
         config.write(f)
+    log(f"Settings saved: {key_name} assigned.")
 
+
+def save_model(model_name):
+    config.read(settings_file)
+    if "Audio" not in config:
+        config["Audio"] = {}
+    config.set("Audio", "model_size", model_name)
+    with open(settings_file, "w") as f:
+        config.write(f)
+    log(f"Settings saved: Model changed to {model_name}")
 
 
 def check_gpu():
     if torch.cuda.is_available():
-        print(f"✅ GPU FOUND: {torch.cuda.get_device_name(0)}")
+        gpu_name = torch.cuda.get_device_name(0)
+        log(f"✅ GPU FOUND: {gpu_name}")
         return "cuda"
-    print("⚠️ GPU NOT FOUND: Using CPU (Slower)")
+    log("⚠️ GPU NOT FOUND: Using CPU (Slower)")
     return "cpu"
 
 
 # ------------------------------
-# HELPERS
+# CLEANUP
 # ------------------------------
-def flush_console_input():
-    """Prevents 'gibberish' keys showing up in the console after hook-based input."""
-    if os.name == "nt":
-        import msvcrt
+def delete_temp_wav():
+    if os.path.exists("temp.wav"):
+        try:
+            os.remove("temp.wav")
+        except Exception:
+            pass
 
-        while msvcrt.kbhit():
-            msvcrt.getch()
-
-
-def scan_code_to_name(scan_code):
-    """Best-effort mapping scan code -> readable key name."""
-    try:
-        for k, codes in keyboard.key_to_scan_codes.items():
-            if scan_code in codes:
-                return k.title()
-    except Exception:
-        pass
-    return f"Scan Code {scan_code}"
-
-
-# ------------------------------
-# SCAN CODE KEY STATE TRACKING (CRITICAL FOR VTT)
-# ------------------------------
-pressed_scan_codes = set()
-
-
-def key_state_handler(event):
-    if event.event_type == keyboard.KEY_DOWN:
-        pressed_scan_codes.add(event.scan_code)
-    elif event.event_type == keyboard.KEY_UP:
-        pressed_scan_codes.discard(event.scan_code)
+def cleanup_models():
+    cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+    
+    if os.path.exists(cache_dir):
+        print(f"\nFound Whisper cache at: {cache_dir}")
+        print("⚠️  This will delete all downloaded AI models.")
+        confirm = input("Are you sure? (yes/no): ").lower()
+        
+        if confirm == "yes":
+            try:
+                shutil.rmtree(cache_dir)
+                log("✅ All AI models deleted. Space freed!")
+            except Exception as e:
+                log(f"❌ Could not delete: {e}")
+        else:
+            log("Cancelled.")
+    else:
+        log("\n✅ No cached models found.")
+    
+    time.sleep(2)
 
 
 # ------------------------------
-# KEY TESTER (NAME + SCANCODE)
+# MENUS
 # ------------------------------
-def run_key_tester():
-    _, _, quit_key, quit_name, _ = load_settings()
-
-    print("\n" + "=" * 35)
-    print("KEY TESTER MODE")
-    print("Press any key to see name + scan code")
-    print(f"Press {quit_name} to return")
-    print("=" * 35)
-
-    running = True
-
-    def on_event(event):
-        nonlocal running
-        if event.event_type == keyboard.KEY_DOWN:
-            if event.scan_code == quit_key:
-                running = False
-                return
-            name = event.name or "Unknown"
-            print(f"Key: {name.title()} | Scan Code: {event.scan_code}")
-
-    hook = keyboard.hook(on_event)
-    while running:
-        time.sleep(0.01)
-    keyboard.unhook(hook)
-
-    flush_console_input()
+def maintenance_menu():
+    while True:
+        os.system("cls" if os.name == "nt" else "clear")
+        print("==============================")
+        print("  MAINTENANCE")
+        print("==============================")
+        print("1. Delete AI Models (Free Space)")
+        print("2. Back")
+        
+        choice = input("\nSelect (1-2): ")
+        
+        if choice == "1":
+            cleanup_models()
+        elif choice == "2":
+            break
 
 
-# ------------------------------
-# PRESS-A-KEY-TO-BIND (SIMPLE)
-# ------------------------------
+def change_model_menu():
+    os.system("cls" if os.name == "nt" else "clear")
+    print("==============================")
+    print("  SELECT AI MODEL")
+    print("==============================")
+    print("1. tiny   (Fastest / Not smart)")
+    print("2. base   (Fast / Okay)")
+    print("3. small  (Balanced)")
+    print("4. medium (Recommended)")
+    print("5. large  (Slowest / Best)")
+    print("------------------------------")
+    
+    choice = input("Select: ").lower().strip()
+    mapping = {"1": "tiny", "2": "base", "3": "small", "4": "medium", "5": "large"}
+    if choice in mapping: choice = mapping[choice]
+
+    if choice in ["tiny", "base", "small", "medium", "large"]:
+        save_model(choice)
+    else:
+        log("Invalid choice.")
+    time.sleep(1)
+
+
 def capture_key_once():
-    print("\nPress a key now...")
-
+    log("Waiting for key press...")
     captured = {}
-
     def on_event(event):
         if event.event_type == keyboard.KEY_DOWN:
             captured["scan_code"] = event.scan_code
             captured["name"] = event.name or "Unknown"
             keyboard.unhook(hook)
-
     hook = keyboard.hook(on_event)
-
     while "scan_code" not in captured:
         time.sleep(0.01)
-
     flush_console_input()
     return captured["scan_code"], captured["name"]
 
 
-def key_menu():
+def key_settings_menu():
     while True:
         record_key, record_name, quit_key, quit_name, _ = load_settings()
-
         os.system("cls" if os.name == "nt" else "clear")
         print("==============================")
-        print("  CHANGE KEYS")
+        print("  KEY SETTINGS")
         print("==============================")
-        print(f"Record Key: {record_name} (Scan Code {record_key})")
-        print(f"Quit Key:   {quit_name} (Scan Code {quit_key})")
+        print(f"Record Key: {record_name}")
+        print(f"Quit Key:   {quit_name}")
         print("------------------------------")
         print("1. Set Record Key")
         print("2. Set Quit Key")
@@ -192,117 +239,149 @@ def key_menu():
         if choice == "1":
             scan, name = capture_key_once()
             save_key("record_key", "record_name", scan, name)
-            print(f"Saved Record Key: {name.title()} (Scan Code {scan})")
-            time.sleep(1)
-
         elif choice == "2":
             scan, name = capture_key_once()
             save_key("quit_key", "quit_name", scan, name)
-            print(f"Saved Quit Key: {name.title()} (Scan Code {scan})")
-            time.sleep(1)
-
         elif choice == "3":
             break
 
 
+# ------------------------------
+# VOICE TOOL
+# ------------------------------
+pressed_scan_codes = set()
 
-# ------------------------------
-# VOICE TOOL (SCAN-CODE SAFE)
-# ------------------------------
+def key_state_handler(event):
+    if event.event_type == keyboard.KEY_DOWN:
+        pressed_scan_codes.add(event.scan_code)
+    elif event.event_type == keyboard.KEY_UP:
+        pressed_scan_codes.discard(event.scan_code)
+
 def run_voice_tool():
     record_key, record_name, quit_key, quit_name, model_size = load_settings()
+    
+    log(f"Initializing Voice Tool (Model: {model_size})...")
     device = check_gpu()
 
-    print(f"Loading Whisper model ({model_size})...")
-    model = whisper.load_model(model_size, device=device)
+    try:
+        model = whisper.load_model(model_size, device=device)
+        log("Model loaded successfully.")
+    except Exception as e:
+        log_crash(e)
+        input("Press Enter to return...")
+        return
 
-    print("\n✅ READY!")
-    print(f"Hold {record_name} to talk")
-    print(f"Press {quit_name} to return")
-
+    print(f"\n✅ READY! Hold {record_name} to talk, {quit_name} to return.")
+    
     hook = keyboard.hook(key_state_handler)
 
-    while True:
-        if record_key in pressed_scan_codes:
-            audio = pyaudio.PyAudio()
-            stream = audio.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=44100,
-                input=True,
-                frames_per_buffer=1024,
-            )
+    try:
+        while True:
+            if record_key in pressed_scan_codes:
+                audio = pyaudio.PyAudio()
+                try:
+                    stream = audio.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=1024)
+                    frames = []
+                    
+                    winsound.Beep(800, 100)
+                    print("🔴 Recording...", end="\r") # Print without newline to keep clean
 
-            frames = []
-            winsound.Beep(800, 100)
-            print("🔴 Recording...")
+                    while record_key in pressed_scan_codes:
+                        data = stream.read(1024, exception_on_overflow=False)
+                        frames.append(data)
 
-            while record_key in pressed_scan_codes:
-                data = stream.read(1024, exception_on_overflow=False)
-                frames.append(data)
+                    winsound.Beep(400, 150)
+                    print("⏳ Processing...         ", end="\r")
 
-            winsound.Beep(400, 150)
-            print("⏳ Processing...")
+                    stream.stop_stream()
+                    stream.close()
+                    audio.terminate()
 
-            stream.stop_stream()
-            stream.close()
-            audio.terminate()
+                    with wave.open("temp.wav", "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(44100)
+                        wf.writeframes(b"".join(frames))
 
-            # Join recorded frames (16-bit PCM @ 44100 Hz)
-            pcm_44k = b"".join(frames)
+                    result = model.transcribe("temp.wav")
+                    text = result["text"].strip()
 
-            # Resample to 16000 Hz (Whisper expects 16 kHz audio)
-            pcm_16k, _ = audioop.ratecv(pcm_44k, 2, 1, 44100, 16000, None)
+                    if text:
+                        pyperclip.copy(text)
+                        log(f"Transcribed: {text}") # Logs what you said
+                        winsound.Beep(523, 150)
+                        winsound.Beep(659, 200)
+                    else:
+                        print("⚠️ No speech detected.      ")
+                        
+                    delete_temp_wav()
 
-            # Convert to float32 numpy array in [-1, 1]
-            audio_np = np.frombuffer(pcm_16k, np.int16).astype(np.float32) / 32768.0
+                except Exception as e:
+                    log_crash(e)
+                    time.sleep(1)
 
-            # Transcribe directly from audio array (no ffmpeg needed)
-            result = model.transcribe(audio_np)
-            text = result["text"].strip()
+            if quit_key in pressed_scan_codes:
+                log("User quit Voice Tool.")
+                break
+            time.sleep(0.01)
+            
+    except Exception as e:
+        log_crash(e)
+        input("Critical Error. Press Enter...")
 
-            if text:
-                pyperclip.copy(text)
-                print(f"Copied: {text}")
-                winsound.Beep(523, 150)
-                winsound.Beep(659, 200)
-            else:
-                print("⚠️ No speech detected.")
+    finally:
+        keyboard.unhook(hook)
+        pressed_scan_codes.clear()
+        delete_temp_wav()
 
-        if quit_key in pressed_scan_codes:
-            break
 
-        time.sleep(0.01)
-
-    keyboard.unhook(hook)
-    pressed_scan_codes.clear()
+def flush_console_input():
+    if os.name == "nt":
+        import msvcrt
+        while msvcrt.kbhit():
+            msvcrt.getch()
 
 
 # ------------------------------
-# MAIN MENU
+# MAIN
 # ------------------------------
 def main():
+    start_new_log() # <--- Wipes log at start
+    delete_temp_wav()
+    
     while True:
-        os.system("cls" if os.name == "nt" else "clear")
-        print("==============================")
-        print("  GAMER S TO T TOOL")
-        print("==============================")
-        print("1. Start Voice-to-Text")
-        print("2. Find a Key (Key Tester)")
-        print("3. Change Keys")
-        print("4. Exit")
+        try:
+            _, _, _, _, model_size = load_settings()
 
-        flush_console_input() 
-        choice = input("\nSelect (1-4): ")
+            os.system("cls" if os.name == "nt" else "clear")
+            print("==============================")
+            print(f"  GAMER ACCESSIBILITY TOOL ({model_size})")
+            print("==============================")
+            print("1. Start Voice-to-Text")
+            print("2. Change AI Model")
+            print("3. Change Keys")
+            print("4. Maintenance")
+            print("5. Exit")
 
-        if choice == "1":
-            run_voice_tool()
-        elif choice == "2":
-            run_key_tester()
-        elif choice == "3":
-            key_menu()
-        elif choice == "4":
-            break
+            flush_console_input() 
+            choice = input("\nSelect (1-5): ")
+
+            if choice == "1":
+                run_voice_tool()
+            elif choice == "2":
+                change_model_menu()
+            elif choice == "3":
+                key_settings_menu()
+            elif choice == "4":
+                maintenance_menu()
+            elif choice == "5":
+                log("Program exited by user.")
+                delete_temp_wav()
+                break
+        
+        except Exception as e:
+            log_crash(e)
+            input("Menu Error. Press Enter to restart...")
 
 
 if __name__ == "__main__":
