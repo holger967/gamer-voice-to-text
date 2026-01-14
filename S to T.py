@@ -9,6 +9,9 @@ import winsound
 import os
 import configparser
 import warnings
+import audioop
+import numpy as np
+
 
 warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
 
@@ -245,13 +248,17 @@ def run_voice_tool():
             stream.close()
             audio.terminate()
 
-            with wave.open("temp.wav", "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(44100)
-                wf.writeframes(b"".join(frames))
+            # Join recorded frames (16-bit PCM @ 44100 Hz)
+            pcm_44k = b"".join(frames)
 
-            result = model.transcribe("temp.wav")
+            # Resample to 16000 Hz (Whisper expects 16 kHz audio)
+            pcm_16k, _ = audioop.ratecv(pcm_44k, 2, 1, 44100, 16000, None)
+
+            # Convert to float32 numpy array in [-1, 1]
+            audio_np = np.frombuffer(pcm_16k, np.int16).astype(np.float32) / 32768.0
+
+            # Transcribe directly from audio array (no ffmpeg needed)
+            result = model.transcribe(audio_np)
             text = result["text"].strip()
 
             if text:
@@ -278,7 +285,7 @@ def main():
     while True:
         os.system("cls" if os.name == "nt" else "clear")
         print("==============================")
-        print("  GAMER ACCESSIBILITY TOOL")
+        print("  GAMER S TO T TOOL")
         print("==============================")
         print("1. Start Voice-to-Text")
         print("2. Find a Key (Key Tester)")
