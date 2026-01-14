@@ -1,6 +1,7 @@
-keyboard
 openai-whisper
-torch
-pyaudio
-numpy
+keyboard
 pyperclip
+pyaudio
+winsound; platform_system == "Windows"
+torch
+numpy
