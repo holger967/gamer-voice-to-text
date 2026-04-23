@@ -279,6 +279,7 @@ def run_voice_tool():
         while True:
             if record_key in pressed_scan_codes:
                 audio = pyaudio.PyAudio()
+                stream = None
                 try:
                     stream = audio.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=1024)
                     frames = []
@@ -290,12 +291,12 @@ def run_voice_tool():
                         data = stream.read(1024, exception_on_overflow=False)
                         frames.append(data)
 
+                    if not frames:
+                        print("⚠️ Recording too short. Try again.  ")
+                        continue
+
                     winsound.Beep(400, 150)
                     print("⏳ Processing...         ", end="\r")
-
-                    stream.stop_stream()
-                    stream.close()
-                    audio.terminate()
 
                     with wave.open("temp.wav", "wb") as wf:
                         wf.setnchannels(1)
@@ -319,6 +320,17 @@ def run_voice_tool():
                 except Exception as e:
                     log_crash(e)
                     time.sleep(1)
+                finally:
+                    if stream is not None:
+                        try:
+                            stream.stop_stream()
+                            stream.close()
+                        except Exception:
+                            pass
+                    try:
+                        audio.terminate()
+                    except Exception:
+                        pass
 
             if quit_key in pressed_scan_codes:
                 log("User quit Voice Tool.")
